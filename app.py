@@ -1,8 +1,10 @@
 import streamlit as st
 import os
-import tempfile
 import re
+import tempfile
 import smtplib
+import datetime
+import uuid
 from email.message import EmailMessage
 
 import PyPDF2
@@ -11,41 +13,27 @@ from sklearn.metrics.pairwise import cosine_similarity
 from groq import Groq
 
 
-# ==============================
-# PAGE + UI STYLE
-# ==============================
-st.set_page_config(page_title="AI Resume Screening", layout="wide")
+# -------------------- PAGE CONFIG --------------------
+st.set_page_config(
+    page_title="AI Recruitment Dashboard",
+    page_icon="🤖",
+    layout="wide"
+)
 
-st.markdown("""
-<style>
-.block-container {
-    padding-top: 2rem;
-}
-.card {
-    background-color: #111827;
-    padding: 16px;
-    border-radius: 10px;
-    margin-bottom: 12px;
-}
-.accepted {
-    border-left: 6px solid #22c55e;
-}
-.rejected {
-    border-left: 6px solid #ef4444;
-}
-</style>
-""", unsafe_allow_html=True)
+st.title("🤖 AI Recruitment Screening Dashboard")
+st.caption("Automated screening with interview scheduling & AI insights")
+st.divider()
 
 
-# ==============================
-# LOAD ML MODEL
-# ==============================
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# -------------------- LOAD MODEL --------------------
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
 
 
-# ==============================
-# HELPER FUNCTIONS
-# ==============================
+# -------------------- HELPERS --------------------
 def extract_text(file_path):
     text = ""
     with open(file_path, "rb") as f:
@@ -57,39 +45,69 @@ def extract_text(file_path):
 
 def extract_email(text):
     match = re.search(
-        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text
+        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+        text
     )
     return match.group(0) if match else None
 
 
-def send_status_email(to_email, status):
+def generate_interview_link():
+    unique_id = str(uuid.uuid4())[:8]
+    link = f"https://teams.microsoft.com/l/meetup-join/{unique_id}"
+    expiry = datetime.datetime.now() + datetime.timedelta(days=1)
+    return link, expiry.strftime("%Y-%m-%d %H:%M")
+
+
+def send_status_email(to_email, status, candidate_name, interview_time=None):
     sender_email = st.secrets["EMAIL"]
     sender_password = st.secrets["EMAIL_PASSWORD"]
+    interviewer_email = st.secrets["INTERVIEWER_EMAIL"]
 
     msg = EmailMessage()
     msg["From"] = sender_email
     msg["To"] = to_email
 
     if status == "Selected":
-        msg["Subject"] = "Application Status – Shortlisted"
+        interview_link, expiry_time = generate_interview_link()
+
+        msg["Subject"] = "Interview Invitation – AI Recruitment"
         msg.set_content(
-            "Dear Candidate,\n\n"
-            "We are pleased to inform you that your profile has been shortlisted.\n"
-            "Our HR team will contact you with next steps.\n\n"
-            "Regards,\nHR Team"
+            f"Dear Candidate,\n\n"
+            f"Congratulations! You have been shortlisted.\n\n"
+            f"Interview Time: {interview_time}\n\n"
+            f"Join your interview:\n{interview_link}\n\n"
+            f"This link is valid until: {expiry_time}\n\n"
+            f"Regards,\nHR Team"
         )
+
+        # -------- INTERVIEWER ALERT --------
+        alert = EmailMessage()
+        alert["From"] = sender_email
+        alert["To"] = interviewer_email
+        alert["Subject"] = "New Interview Scheduled"
+
+        alert.set_content(
+            f"Candidate: {candidate_name}\n"
+            f"Interview Time: {interview_time}\n"
+            f"Meeting Link: {interview_link}"
+        )
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+            server.send_message(alert)
+
     else:
         msg["Subject"] = "Application Status Update"
         msg.set_content(
             "Dear Candidate,\n\n"
-            "Thank you for your interest. After careful review, "
-            "we will not be moving forward at this stage.\n\n"
+            "Thank you for your interest. We will not proceed further.\n\n"
             "Regards,\nHR Team"
         )
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(sender_email, sender_password)
-        server.send_message(msg)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
 
 
 def generate_ai_explanation(jd_text, resume_text, percentage, status):
@@ -107,8 +125,7 @@ Candidate Resume:
 Match Score: {percentage}%
 Final Decision: {status}
 
-Explain the decision in bullet points (2–4 points).
-Be clear, factual, and professional.
+Give 3 short bullet points explaining the decision.
 """
 
     response = client.chat.completions.create(
@@ -120,62 +137,55 @@ Be clear, factual, and professional.
     return response.choices[0].message.content
 
 
-# ==============================
-# UI – INPUT SECTION
-# ==============================
-st.title("🤖 AI Resume Screening Platform")
-st.caption("AI-powered shortlisting with explainable decisions")
-
-st.subheader("📄 Job Details")
-
-job_description = st.text_area(
-    "Job Description",
-    height=180,
-    placeholder="Paste the job description here..."
-)
-
+# -------------------- INPUT UI --------------------
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    uploaded_files = st.file_uploader(
-        "Upload Resumes (PDF only)",
-        type=["pdf"],
-        accept_multiple_files=True
+    job_description = st.text_area(
+        "📌 Job Description",
+        height=220,
+        placeholder="Paste job description here..."
     )
 
 with col2:
-    threshold = st.slider("Shortlisting Threshold (%)", 0, 100, 70)
-    run = st.button("🚀 Run Screening", use_container_width=True)
+    threshold = st.slider("🎯 Threshold (%)", 0, 100, 70)
+    interview_time = st.datetime_input("🗓️ Select Interview Time")
+
+st.subheader("📂 Upload Resumes")
+
+uploaded_files = st.file_uploader(
+    "Upload PDF resumes",
+    type=["pdf"],
+    accept_multiple_files=True
+)
+
+run = st.button("🚀 Run Screening", use_container_width=True)
 
 
-# ==============================
-# MAIN LOGIC
-# ==============================
+# -------------------- MAIN LOGIC --------------------
+accepted = []
+rejected = []
+
 if run and job_description and uploaded_files:
 
     jd_embedding = model.encode(job_description)
 
-    accepted = []
-    rejected = []
-
     for uploaded_file in uploaded_files:
+
         suffix = os.path.splitext(uploaded_file.name)[1]
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
             temp.write(uploaded_file.getvalue())
             temp_path = temp.name
 
-        if os.path.getsize(temp_path) == 0:
-            st.error(f"{uploaded_file.name} is empty or corrupted.")
-            continue
-
         resume_text = extract_text(temp_path)
 
         if not resume_text.strip():
-            st.error(f"No readable text found in {uploaded_file.name}")
+            st.warning(f"No readable text in {uploaded_file.name}")
             continue
 
         resume_embedding = model.encode(resume_text)
+
         score = cosine_similarity(
             [jd_embedding],
             [resume_embedding]
@@ -185,9 +195,12 @@ if run and job_description and uploaded_files:
 
         if percentage >= threshold:
             status = "Selected"
+            accepted.append((uploaded_file.name, percentage))
         else:
             status = "Rejected"
+            rejected.append((uploaded_file.name, percentage))
 
+        # -------- AI EXPLANATION --------
         explanation = generate_ai_explanation(
             job_description,
             resume_text,
@@ -195,52 +208,53 @@ if run and job_description and uploaded_files:
             status
         )
 
+        st.markdown(f"### 🧠 AI Explanation – {uploaded_file.name}")
+        st.info(explanation)
+
+        # -------- EMAIL --------
         email = extract_email(resume_text)
+
         if email:
             try:
-                send_status_email(email, status)
+                send_status_email(
+                    email,
+                    status,
+                    uploaded_file.name,
+                    interview_time
+                )
                 st.success(f"Email sent to {email} ({status})")
             except Exception as e:
-                st.error(f"Email failed for {email}: {e}")
+                st.error(f"Email failed: {e}")
         else:
-            st.warning(f"No email found in {uploaded_file.name}")
-
-        if status == "Selected":
-            accepted.append((uploaded_file.name, percentage, explanation))
-        else:
-            rejected.append((uploaded_file.name, percentage, explanation))
+            st.warning("No email found in resume")
 
 
-    # ==============================
-    # RESULTS SECTION
-    # ==============================
+    # -------------------- DASHBOARD --------------------
     st.divider()
-    colA, colB = st.columns(2)
+    st.subheader("📊 Summary")
 
-    with colA:
-        st.subheader("✅ Accepted Candidates")
-        for name, score, explanation in accepted:
-            st.markdown(f"""
-            <div class="card accepted">
-                <h4>{name}</h4>
-                <b>Match Score:</b> {score}%
-            </div>
-            """, unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total", len(accepted) + len(rejected))
+    c2.metric("Selected", len(accepted))
+    c3.metric("Rejected", len(rejected))
 
-            for line in explanation.split("\n"):
-                if line.strip():
-                    st.markdown(f"- {line.strip()}")
+    st.divider()
 
-    with colB:
-        st.subheader("❌ Rejected Candidates")
-        for name, score, explanation in rejected:
-            st.markdown(f"""
-            <div class="card rejected">
-                <h4>{name}</h4>
-                <b>Match Score:</b> {score}%
-            </div>
-            """, unsafe_allow_html=True)
+    # -------------------- RESULTS --------------------
+    left, right = st.columns(2)
 
-            for line in explanation.split("\n"):
-                if line.strip():
-                    st.markdown(f"- {line.strip()}")
+    with left:
+        st.markdown("### ✅ Selected Candidates")
+        if accepted:
+            for name, score in accepted:
+                st.success(f"{name} — {score}%")
+        else:
+            st.info("No selected candidates")
+
+    with right:
+        st.markdown("### ❌ Rejected Candidates")
+        if rejected:
+            for name, score in rejected:
+                st.error(f"{name} — {score}%")
+        else:
+            st.info("No rejected candidates")

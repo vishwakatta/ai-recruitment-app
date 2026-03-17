@@ -1,7 +1,7 @@
 [theme]
-base="dark"
-primaryColor="#6366f1"
-backgroundColor="#020617"
-secondaryBackgroundColor="#0f172a"
-textColor="#e5e7eb"
-font="sans serif"
+base = "light"
+primaryColor = "#2563eb"        # Blue (buttons, slider)
+backgroundColor = "#ffffff"     # White
+secondaryBackgroundColor = "#f8fafc"
+textColor = "#0f172a"
+font = "sans serif"
